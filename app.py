@@ -7,40 +7,28 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import joblib
+import pickle  # fallback if joblib fails
 
-import pickle
-
+# ---------------- Paths & App config ----------------
 APP_DIR = Path(__file__).parent.resolve()
-MODEL_DIR = APP_DIR / "models"
-MODEL_NAME = "rf_best_model.pkl"   # exact filename in your repo
-MODEL_PATH = MODEL_DIR / MODEL_NAME
+MODELS_DIR = APP_DIR / "models"          # single source of truth
 
-# --- Diagnostics: show what Streamlit sees ---
-st.caption(f"App dir: {APP_DIR}")
-st.caption(f"Models dir exists: {MODEL_DIR.exists()}")
-if MODEL_DIR.exists():
-    st.caption(f"Files in models/: {[p.name for p in MODEL_DIR.iterdir()]}")
-
-# --- Load the model robustly ---
-model = None
-if MODEL_PATH.exists():
-    with open(MODEL_PATH, "rb") as f:
-        model = pickle.load(f)
-else:
-    st.warning(f"Model not found at: {MODEL_PATH}")
-
-# ---------------- App config ----------------
 st.set_page_config(page_title="Credit Card Fraud Detection", layout="wide")
 st.title("Credit Card Fraud Detection")
-st.caption("Upload a file, choose a model & threshold — it will score every transaction and flag likely fraud. Get the fraud probability, a Fraud/Legit label, and a downloadable CSV.")
-
-MODELS_DIR = Path("models")
-MODELS_DIR.mkdir(exist_ok=True)
+st.caption(
+    "Upload a file, choose a model & threshold — it will score every transaction and flag likely fraud. "
+    "Get the fraud probability, a Fraud/Legit label, and a downloadable CSV."
+)
 
 # ---------------- Helpers ----------------
 @st.cache_resource
 def load_model(path: Path):
-    return joblib.load(path)
+    """Load a scikit-learn model saved with joblib or pickle."""
+    try:
+        return joblib.load(path)
+    except Exception:
+        with open(path, "rb") as f:
+            return pickle.load(f)
 
 def read_any_table(upload) -> pd.DataFrame | None:
     """Read CSV/XLSX/XLS; prefer CSV for reliability."""
@@ -55,7 +43,7 @@ def read_any_table(upload) -> pd.DataFrame | None:
             return pd.read_excel(upload, engine="openpyxl")
         elif name.endswith(".xls"):
             try:
-                import xlrd  # requires xlrd==1.2.0 for true .xls
+                import xlrd  # only needed for legacy .xls
             except Exception:
                 raise ValueError("Reading .xls needs xlrd==1.2.0; or resave as CSV/.xlsx.")
             return pd.read_excel(upload, engine="xlrd")
@@ -74,13 +62,14 @@ def read_any_table(upload) -> pd.DataFrame | None:
         return None
 
 def get_expected_columns_from_model(model):
-    # Try to infer feature names from model/pipeline
+    """Try to infer expected feature names from the model/pipeline."""
     if hasattr(model, "feature_names_in_"):
         return list(model.feature_names_in_)
     if hasattr(model, "named_steps"):
         for _, step in model.named_steps.items():
             if hasattr(step, "feature_names_in_"):
                 return list(step.feature_names_in_)
+    # Optional: allow a saved schema at models/expected_columns.joblib
     schema_file = MODELS_DIR / "expected_columns.joblib"
     if schema_file.exists():
         try:
@@ -89,9 +78,10 @@ def get_expected_columns_from_model(model):
                 return list(cols)
         except Exception:
             pass
-    return None  # unknown
+    return None
 
 def align_to_expected(df: pd.DataFrame, expected_cols):
+    """Reorder/subset columns to match training schema."""
     if expected_cols is None:
         return df
     missing = [c for c in expected_cols if c not in df.columns]
@@ -103,6 +93,7 @@ def align_to_expected(df: pd.DataFrame, expected_cols):
     return df[[c for c in expected_cols if c in df.columns]]
 
 def coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce to numeric; fill non-numeric with 0 after warning."""
     out = df.apply(pd.to_numeric, errors="coerce")
     if out.isna().any().any():
         st.warning("Some values were not numeric and became NaN — filling with 0.")
@@ -110,6 +101,7 @@ def coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def predict_with_threshold(model, X: pd.DataFrame, threshold: float):
+    """Return (preds, proba) using predict_proba/decision_function/predict."""
     if hasattr(model, "predict_proba"):
         proba = model.predict_proba(X)[:, 1]
     elif hasattr(model, "decision_function"):
@@ -130,7 +122,12 @@ st.sidebar.header("Controls")
 available_models = [p.name for p in MODELS_DIR.glob("*.pkl")]
 if not available_models:
     st.sidebar.warning("No model files found in ./models. Put rf_best_model.pkl there.")
-model_name = st.sidebar.selectbox("Choose model", options=available_models or ["(no models found)"])
+
+model_name = st.sidebar.selectbox(
+    "Choose model",
+    options=available_models or ["(no models found)"],
+    index=0 if available_models else 0,
+)
 
 threshold = st.sidebar.slider(
     "Alert threshold (fraud probability)",
@@ -143,23 +140,24 @@ uploaded = st.sidebar.file_uploader(
     type=["csv", "xlsx", "xls"]
 )
 
-# IMPORTANT: give the checkbox a key; we’ll read from session_state
 st.sidebar.checkbox("Show only flagged transactions", value=False, key="only_flags")
 
 preview_limit = st.sidebar.number_input(
     "Preview rows (table)", min_value=10, max_value=2000, value=200, step=10
 )
 
-# ---------------- Main (batch only) ----------------
+# ---------------- Main ----------------
 if not available_models:
-    st.info("Waiting for a model… Add a .pkl in ./models, select it above.")
+    st.info("Waiting for a model… Add a .pkl in ./models, then refresh.")
 else:
+    # Load selected model
     try:
         model = load_model(MODELS_DIR / model_name)
     except Exception as e:
         st.error(f"Failed to load model: {e}")
         model = None
 
+    # Score uploaded file
     if model is not None and uploaded is not None:
         df_raw = read_any_table(uploaded)
         if df_raw is not None and len(df_raw) > 0:
@@ -208,7 +206,7 @@ else:
                     )
                     st.dataframe(subset.head(int(preview_limit)), use_container_width=True)
 
-                # Download: user chooses all vs only flagged
+                # Download choice: all vs only flagged
                 download_choice = st.radio(
                     "Download which rows?",
                     options=["All rows", "Only flagged"],
