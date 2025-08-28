@@ -8,6 +8,27 @@ import pandas as pd
 import streamlit as st
 import joblib
 
+import pickle
+
+APP_DIR = Path(__file__).parent.resolve()
+MODEL_DIR = APP_DIR / "models"
+MODEL_NAME = "rf_best_model.pkl"   # exact filename in your repo
+MODEL_PATH = MODEL_DIR / MODEL_NAME
+
+# --- Diagnostics: show what Streamlit sees ---
+st.caption(f"App dir: {APP_DIR}")
+st.caption(f"Models dir exists: {MODEL_DIR.exists()}")
+if MODEL_DIR.exists():
+    st.caption(f"Files in models/: {[p.name for p in MODEL_DIR.iterdir()]}")
+
+# --- Load the model robustly ---
+model = None
+if MODEL_PATH.exists():
+    with open(MODEL_PATH, "rb") as f:
+        model = pickle.load(f)
+else:
+    st.warning(f"Model not found at: {MODEL_PATH}")
+
 # ---------------- App config ----------------
 st.set_page_config(page_title="Credit Card Fraud Detection", layout="wide")
 st.title("Credit Card Fraud Detection")
